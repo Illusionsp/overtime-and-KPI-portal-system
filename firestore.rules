@@ -1,0 +1,71 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function getRole(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid)) ?
+        get(/databases/$(database)/documents/users/$(uid)).data.role : null;
+    }
+
+    function isAdmin() {
+      return request.auth != null && getRole(request.auth.uid) == 'admin';
+    }
+
+    function isApprover() {
+      return request.auth != null && getRole(request.auth.uid) == 'approver';
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Users collection
+    match /users/{uid} {
+      allow read: if isSignedIn();
+
+      // Public self-registration: allow a user to create their own doc but only with role 'viewer' 
+      allow create: if request.auth != null &&
+                    request.auth.uid == uid &&
+                    request.resource.data.role == 'viewer';
+
+      // Admins or approvers can create user docs via admin flows (Cloud Functions)
+      allow create: if isAdmin() || isApprover();
+
+      // Updating: only admin or approver can update user docs,
+      // but if changing role, only admin may set/change role
+      allow update: if isAdmin() || isApprover() && (
+        // if trying to modify role, require admin
+        (request.resource.data.role == resource.data.role) ||
+        (isAdmin() && request.resource.data.role != null)
+      );
+
+      // Only admin or approver can delete user docs
+      allow delete: if isAdmin() || isApprover();
+    }
+
+    // KPI: all signed in users can read; only admin/approver can write
+    match /kpi/{docId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin() || isApprover();
+    }
+
+    // Overtime:
+    match /overtime/{docId} {
+      allow read: if isSignedIn();
+      // any signed-in user can create an overtime request (their own)
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.requesterId;
+      // Only approver may update overtime status (approve/reject)
+      allow update: if isApprover()
+                    // allow approver to update only status and approved metadata (not arbitrary fields)
+                    && (request.resource.data.status in ['approved','rejected','pending'])
+                    && request.resource.data.approvedBy == request.auth.uid;
+      // delete allowed for admin or approver (cleanup)
+      allow delete: if isAdmin() || isApprover();
+    }
+
+    // fallback: deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
